@@ -27,14 +27,14 @@ object PersistentStunDB {
 }
 
 object PersistentGhostCatalog {
-  val ghostToPoint = mutable.Map.empty[Int, Ghost]
+  val ghostIdToGhost = mutable.Map.empty[Int, Ghost]
 
-  def updateGhost(ghost: Ghost): Unit = ghostToPoint.put(ghost.id, ghost)
+  def updateGhost(ghost: Ghost): Unit = ghostIdToGhost.put(ghost.id, ghost)
 
-  def updateAfterRound(): Unit = ghostToPoint.keySet.foreach { ghostId =>
-    val staleGhost = ghostToPoint(ghostId)
+  def updateAfterRound(): Unit = ghostIdToGhost.keySet.foreach { ghostId =>
+    val staleGhost = ghostIdToGhost(ghostId)
 
-    ghostToPoint(ghostId) = new Ghost(
+    ghostIdToGhost(ghostId) = new Ghost(
       id = staleGhost.id,
       name = staleGhost.name,
       point = staleGhost.point,
@@ -44,25 +44,37 @@ object PersistentGhostCatalog {
     )
   }
 
-  def annotateCapture(ghostId: Int, busterId: Int): Unit = {
-    val staleGhost = ghostToPoint(ghostId)
+  def annotateCapture(ghostId: Int, buster: Buster): Unit = {
+    if (ghostIdToGhost.get(ghostId).isEmpty) {    // happens when we catch an enemy buster with a capture
+      ghostIdToGhost(ghostId) = new Ghost(
+        id = ghostId,
+        name = "N/A",
+        point = buster.point,
+        numTiedBusters = 0,
+        seenThisRound = true,
+        heldByGhostId = Some(buster.id)
+      )
+    } else {                                      // happens when we see a ghost
+      val staleGhost = ghostIdToGhost(ghostId)
 
-    ghostToPoint(ghostId) = new Ghost(
-      id = staleGhost.id,
-      name = staleGhost.name,
-      point = staleGhost.point,
-      numTiedBusters = staleGhost.numTiedBusters,
-      seenThisRound = true,
-      heldByGhostId = Some(busterId)
-    )
+      ghostIdToGhost(ghostId) = new Ghost(
+        id = staleGhost.id,
+        name = staleGhost.name,
+        point = staleGhost.point,
+        numTiedBusters = staleGhost.numTiedBusters,
+        seenThisRound = true,
+        heldByGhostId = Some(buster.id)
+      )
+    }
   }
 
   def getGhostHeldByBuster(buster: Buster): Option[Ghost] =
-    ghostToPoint.values.find(ghost => ghost.heldByGhostId == Some(buster.id))
+    ghostIdToGhost.values.find(ghost => ghost.heldByGhostId == Some(buster.id))
 
-  def annotateSuccessfulCapture(ghostId: Int): Unit = ghostToPoint -= ghostId
-  def getFreshGhosts: List[Ghost] = ghostToPoint.values.filter(_.seenThisRound == true).toList
-  def getStaleGhosts: List[Ghost] = ghostToPoint.values.filter(_.seenThisRound == false).toList
+  def annotateSuccessfulCapture(ghostId: Int): Unit = ghostIdToGhost -= ghostId
+  def removeStaleGhost(ghost: Ghost): Unit = ghostIdToGhost -= ghost.id
+  def getFreshGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == true).toList
+  def getStaleGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == false).toList
 
 }
 
@@ -89,7 +101,7 @@ object Player extends App {
     val enemyBusters = ListBuffer.empty[Buster]
     var zoneCounter = 0
 
-    System.err.println(PersistentGhostCatalog.ghostToPoint)
+    System.err.println(PersistentGhostCatalog.ghostIdToGhost)
 
     for(i <- 0 until entities) {
       // entityid: buster id or ghost id
@@ -101,33 +113,34 @@ object Player extends App {
       Console.err.println(s"entityid:$entityid x:$x y:$y, entitytype:$entitytype state:$state value:$value")
 
       if (entitytype == myteamid) {   // friendly buster
-        busters += new Buster(entityid, Buster.NAMES(entityid), Point(x, y), zones(zoneCounter))
+        val myBuster = new Buster(entityid, Buster.NAMES(entityid), Point(x, y), zones(zoneCounter))
+        busters += myBuster
 
         if (state == 1)               // buster carrying a ghost
-          PersistentGhostCatalog.annotateCapture(value, entityid)
+          PersistentGhostCatalog.annotateCapture(value, myBuster)
 
       } else if (entitytype == -1) {  // a ghost
         PersistentGhostCatalog.updateGhost(
           new Ghost(entityid, Ghost.NAMES(entityid), Point(x, y), value, seenThisRound = true, heldByGhostId = None)
         )
       } else {                        // enemy buster
-        if (state == 1)               // buster carrying a ghost
-          PersistentGhostCatalog.annotateCapture(value, entityid)
+        val enemyBuster = new Buster(entityid, "Huge Loser", Point(x, y), null)
+        enemyBusters += enemyBuster
 
-        enemyBusters += new Buster(entityid, "Huge Loser", Point(x, y), null)
+        if (state == 1)               // buster carrying a ghost
+          PersistentGhostCatalog.annotateCapture(value, enemyBuster)
       }
 
       zoneCounter += 1
     }
 
-    val rand = new Random()
+    val coldCaseGhosts = PersistentGhostCatalog.getStaleGhosts.to[ListBuffer]
 
     for (buster <- busters) {
       val maybeGhostInPossesion = PersistentGhostCatalog.getGhostHeldByBuster(buster)
       val maybeEnemyBusterToStun = enemyBusters.find(enemy => buster.isAbleToStun(enemy))
       val maybeGhostToBust = PersistentGhostCatalog.getFreshGhosts.find(ghost => buster.isAbleToBust(ghost))
       val maybeGhostToChase = PersistentGhostCatalog.getFreshGhosts.find(ghost => buster.shouldPursueGhost(ghost))
-      val coldCaseGhosts = PersistentGhostCatalog.getStaleGhosts.to[ListBuffer]
 
       if (maybeEnemyBusterToStun.nonEmpty) {
         val enemy = maybeEnemyBusterToStun.get
@@ -149,20 +162,35 @@ object Player extends App {
         val destination = Point(maybeGhostToChase.get.point.x, maybeGhostToChase.get.point.y)
         Console.out.println(s"MOVE ${destination.x} ${destination.y} ${buster.name}:Chasing ${maybeGhostToChase.get.name}")
       } else if (coldCaseGhosts.nonEmpty) {
-        val coldCaseGhost = coldCaseGhosts.remove(0)
-        val destination = Point(coldCaseGhost.point.x, coldCaseGhost.point.y)
-        Console.out.println(s"MOVE ${destination.x} ${destination.y} ${buster.name}:Cold Case ${coldCaseGhost.name}")
-      } else {
-        val zone = buster.zone
-        val xSpread = abs(zone.topLeftPoint.x - zone.topRightPoint.x)
-        val randX = zone.topLeftPoint.x + rand.nextInt(xSpread)
+        val ghostsThatAreNotHere = PersistentGhostCatalog.getStaleGhosts.to[ListBuffer].filter(ghost =>
+          ghost.point.x == buster.point.x && ghost.point.y == buster.point.y
+        )
 
-        Console.out.println(s"MOVE $randX ${rand.nextInt(9000)} ${buster.name}:Moving")
+        if (ghostsThatAreNotHere.nonEmpty) {
+          ghostsThatAreNotHere.foreach(ghost => PersistentGhostCatalog.removeStaleGhost(ghost))
+          Console.out.println(wander(buster))
+        } else {
+          val coldCaseGhost = coldCaseGhosts.remove(0)
+          val destination = Point(coldCaseGhost.point.x, coldCaseGhost.point.y)
+          Console.out.println(s"MOVE ${destination.x} ${destination.y} ${buster.name}:Cold Case ${coldCaseGhost.name}")
+        }
+      } else {
+        Console.out.println(wander(buster))
       }
     }
 
     PersistentStunDB.updateAfterRound()
     PersistentGhostCatalog.updateAfterRound()
+  }
+
+  def wander(buster: Buster): String = {
+    val rand = new Random()
+
+    val zone = buster.zone
+    val xSpread = abs(zone.topLeftPoint.x - zone.topRightPoint.x)
+    val randX = zone.topLeftPoint.x + rand.nextInt(xSpread)
+
+    s"MOVE $randX ${rand.nextInt(9000)} ${buster.name}:Wandering"
   }
 }
 
@@ -212,7 +240,7 @@ sealed class Buster(
 
   def isAbleToBust(ghost: Ghost): Boolean = {
     val distance = distanceBetween(ghost)
-    distance <= 1760 && distance >= 900
+    distance <= 1760 && distance >= 900 && ghost.heldByGhostId.isEmpty
   }
 
   def shouldPursueGhost(ghost: Ghost): Boolean = {
