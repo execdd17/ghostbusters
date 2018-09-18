@@ -72,7 +72,6 @@ object PersistentGhostCatalog {
   def removeStaleGhost(ghost: Ghost): Unit = ghostIdToGhost -= ghost.id
   def getFreshGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == true).toList
   def getStaleGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == false).toList
-
 }
 
 object PathCatalog {
@@ -226,12 +225,55 @@ object Player extends App {
   }
 }
 
+object Path {
+  def increasePointsOnLine(pointsToProcess: List[Point], iterations: Int): List[Point] = {
+    (1 to iterations).foldLeft(pointsToProcess) { (points, i) =>
+      lineMaker(pointsToProcess = points, List.empty[List[Point]])
+    }
+  }
+
+  def lineMaker(pointsToProcess: List[Point], lines: List[List[Point]]): List[Point] = {
+    if (pointsToProcess.isEmpty || pointsToProcess.size == 1)
+      return lines.flatten.distinct
+
+    val point1 = pointsToProcess.head
+    val point2 = pointsToProcess(1)
+
+    val augmentedLine = enhanceWithMidpoint(List(point1, point2))
+    lineMaker(pointsToProcess.tail, lines ::: List(augmentedLine))
+  }
+
+  def enhanceWithMidpoint(line: List[Point]): List[Point] = {
+    if (line.size != 2)
+      throw new IllegalArgumentException("Your path must have 2 points!")
+
+    val point1 =  line.head
+    val point2 =  line(1)
+    var newPointX: Int = 0
+    var newPointY: Int = 0
+
+    if (point2.x < point1.x)
+      newPointX = point2.x + (abs(point1.x - point2.x) / 2)
+    else
+      newPointX = point1.x + (abs(point1.x - point2.x) / 2)
+
+    if (point2.y < point1.y)
+      newPointY = point2.y + (abs(point1.y - point2.y) / 2)
+    else
+      newPointY = point1.y + (abs(point1.y - point2.y) / 2)
+
+    List(point1, Point(newPointX, newPointY), point2)
+  }
+}
+
 abstract class Path(startingLocation: Point) {
   private var currentPointIndex = 0
   private val points: List[Point] = startingLocation match {
-    case Point(0,0) => getPoints
-    case _ => getPoints.reverse
+    case Point(0,0) => Path.increasePointsOnLine(getPoints, iterations = 1)
+    case _ => Path.increasePointsOnLine(getPoints.reverse, iterations = 1)
   }
+
+  Console.err.println(s"Path $points")
 
   def getPoints: List[Point]
   def isLooped: Boolean
