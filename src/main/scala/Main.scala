@@ -1,9 +1,6 @@
-package codinggame
-
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.math._
-import scala.util._
 
 object PersistentStunDB {
   val busterIdToLastStun = mutable.Map.empty[Int, Int]
@@ -40,7 +37,7 @@ object PersistentGhostCatalog {
       point = staleGhost.point,
       numTiedBusters = staleGhost.numTiedBusters,
       seenThisRound = false,
-      heldByGhostId = staleGhost.heldByGhostId
+      heldByBusterId = staleGhost.heldByBusterId
     )
   }
 
@@ -52,7 +49,7 @@ object PersistentGhostCatalog {
         point = buster.point,
         numTiedBusters = 0,
         seenThisRound = true,
-        heldByGhostId = Some(buster.id)
+        heldByBusterId = Some(buster.id)
       )
     } else {                                      // happens when we see a ghost
       val staleGhost = ghostIdToGhost(ghostId)
@@ -63,19 +60,41 @@ object PersistentGhostCatalog {
         point = staleGhost.point,
         numTiedBusters = staleGhost.numTiedBusters,
         seenThisRound = true,
-        heldByGhostId = Some(buster.id)
+        heldByBusterId = Some(buster.id)
       )
     }
   }
 
   def getGhostHeldByBuster(buster: Buster): Option[Ghost] =
-    ghostIdToGhost.values.find(ghost => ghost.heldByGhostId == Some(buster.id))
+    ghostIdToGhost.values.find(ghost => ghost.heldByBusterId == Some(buster.id))
 
   def annotateSuccessfulCapture(ghostId: Int): Unit = ghostIdToGhost -= ghostId
   def removeStaleGhost(ghost: Ghost): Unit = ghostIdToGhost -= ghost.id
   def getFreshGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == true).toList
   def getStaleGhosts: List[Ghost] = ghostIdToGhost.values.filter(_.seenThisRound == false).toList
 
+}
+
+object PathCatalog {
+  def getPathsForGame(bustersPerTeam: Int, startingPoint: Point): List[Path] = {
+    bustersPerTeam match {
+      case 2 =>
+        List(new ZigZagPath(startingPoint), new InvertedZigZagPath(startingPoint))
+      case 3 =>
+        List(
+          new BorderPath(startingPoint),
+          new TrianglePath(startingPoint),
+          new InvertedTrianglePath(startingPoint)
+        )
+      case 4 =>
+        List(
+          new BorderPath(startingPoint),
+          new InvertedBorderPath(startingPoint),
+          new TrianglePath(startingPoint),
+          new InvertedTrianglePath(startingPoint)
+        )
+    }
+  }
 }
 
 /**
@@ -86,20 +105,23 @@ object Player extends App {
   val ghostcount = readInt // the amount of ghosts on the map
   val myteamid = readInt // if this is 0, your base is on the top left of the map, if it is one, on the bottom right
   val enemyTeamId = if (myteamid == 0) 1 else 0
+  val basePoint = if (myteamid == 0) Point(0,0) else Point(16000, 9000)
   Console.err.println(s"bustersperplayer:$bustersperplayer ghostcount:$ghostcount myteamid:$myteamid")
 
-  val partitioner = new BoardPartitioner(16001, 9001)
-  val zones = partitioner.partition(bustersperplayer)
-  Console.err.println(s"Zones are $zones")
+  val paths = PathCatalog.getPathsForGame(bustersperplayer, basePoint)
+  val offset = if (myteamid == 0) 0 else bustersperplayer
 
-  val basePoint = if (myteamid == 0) Point(0,0) else Point(16000, 9000)
+  val immutableMap: Map[Int, Buster] = (0 until bustersperplayer).toList.map { i =>
+    val buster = new Buster(i + offset, Buster.NAMES(i + offset), Point(0,0), paths(i))
+    (buster.id, buster)
+  }.toMap
+
+  val busterIdToBuster = mutable.Map(immutableMap.toSeq: _*)
 
   // game loop
   while(true) {
     val entities = readInt // the number of busters and ghosts visible to you
-    val busters = ListBuffer.empty[Buster]
     val enemyBusters = ListBuffer.empty[Buster]
-    var zoneCounter = 0
 
     System.err.println(PersistentGhostCatalog.ghostIdToGhost)
 
@@ -113,15 +135,14 @@ object Player extends App {
       Console.err.println(s"entityid:$entityid x:$x y:$y, entitytype:$entitytype state:$state value:$value")
 
       if (entitytype == myteamid) {   // friendly buster
-        val myBuster = new Buster(entityid, Buster.NAMES(entityid), Point(x, y), zones(zoneCounter))
-        busters += myBuster
+        updateBusterLocation(entityid, Point(x, y))
 
         if (state == 1)               // buster carrying a ghost
-          PersistentGhostCatalog.annotateCapture(value, myBuster)
+          PersistentGhostCatalog.annotateCapture(value, busterIdToBuster(entityid))
 
       } else if (entitytype == -1) {  // a ghost
         PersistentGhostCatalog.updateGhost(
-          new Ghost(entityid, Ghost.NAMES(entityid), Point(x, y), value, seenThisRound = true, heldByGhostId = None)
+          new Ghost(entityid, Ghost.NAMES(entityid), Point(x, y), value, seenThisRound = true, heldByBusterId = None)
         )
       } else {                        // enemy buster
         val enemyBuster = new Buster(entityid, "Huge Loser", Point(x, y), null)
@@ -130,17 +151,21 @@ object Player extends App {
         if (state == 1)               // buster carrying a ghost
           PersistentGhostCatalog.annotateCapture(value, enemyBuster)
       }
-
-      zoneCounter += 1
     }
 
     val coldCaseGhosts = PersistentGhostCatalog.getStaleGhosts.to[ListBuffer]
 
-    for (buster <- busters) {
+    for (buster <- busterIdToBuster.values.toList.sortBy(buster => buster.id)) {
       val maybeGhostInPossesion = PersistentGhostCatalog.getGhostHeldByBuster(buster)
       val maybeEnemyBusterToStun = enemyBusters.find(enemy => buster.isAbleToStun(enemy))
-      val maybeGhostToBust = PersistentGhostCatalog.getFreshGhosts.find(ghost => buster.isAbleToBust(ghost))
-      val maybeGhostToChase = PersistentGhostCatalog.getFreshGhosts.find(ghost => buster.shouldPursueGhost(ghost))
+
+      val maybeGhostToBust = PersistentGhostCatalog.getFreshGhosts.find(ghost =>
+        ghost.heldByBusterId.isEmpty && buster.isAbleToBust(ghost)
+      )
+
+      val maybeGhostToChase = PersistentGhostCatalog.getFreshGhosts.find(ghost =>
+        ghost.heldByBusterId.isEmpty && buster.shouldPursueGhost(ghost)
+      )
 
       if (maybeEnemyBusterToStun.nonEmpty) {
         val enemy = maybeEnemyBusterToStun.get
@@ -157,6 +182,7 @@ object Player extends App {
           Console.out.println(s"MOVE ${basePoint.x} ${basePoint.y} ${buster.name}:Moving to Base")
         }
       } else if (maybeGhostToBust.nonEmpty) {
+          PersistentGhostCatalog.annotateCapture(maybeGhostToBust.get.id, buster)
           Console.out.println(s"BUST ${maybeGhostToBust.get.id} ${buster.name}:Busting")
       } else if (maybeGhostToChase.nonEmpty) {
         val destination = Point(maybeGhostToChase.get.point.x, maybeGhostToChase.get.point.y)
@@ -168,14 +194,14 @@ object Player extends App {
 
         if (ghostsThatAreNotHere.nonEmpty) {
           ghostsThatAreNotHere.foreach(ghost => PersistentGhostCatalog.removeStaleGhost(ghost))
-          Console.out.println(wander(buster))
+          Console.out.println(resumePath(buster))
         } else {
           val coldCaseGhost = coldCaseGhosts.remove(0)
           val destination = Point(coldCaseGhost.point.x, coldCaseGhost.point.y)
           Console.out.println(s"MOVE ${destination.x} ${destination.y} ${buster.name}:Cold Case ${coldCaseGhost.name}")
         }
       } else {
-        Console.out.println(wander(buster))
+        Console.out.println(resumePath(buster))
       }
     }
 
@@ -183,34 +209,104 @@ object Player extends App {
     PersistentGhostCatalog.updateAfterRound()
   }
 
-  def wander(buster: Buster): String = {
-    val rand = new Random()
+  def resumePath(buster: Buster): String = {
+    buster.getPathPoint match {
+      case Some(path) => s"MOVE ${path.x} ${path.y} ${buster.name}:Pathing"
+      case None =>
+        Console.err.println("NO PATH LEFT; Defaulting to BorderPath")
+        val updatedBuster = new Buster(buster.id, buster.name, buster.point, new BorderPath(basePoint))
+        busterIdToBuster(buster.id) = updatedBuster
+        s"MOVE ${updatedBuster.getPathPoint.get.x} ${updatedBuster.getPathPoint.get.y} ${updatedBuster.name}:BORDER PATH"
+    }
+  }
 
-    val zone = buster.zone
-    val xSpread = abs(zone.topLeftPoint.x - zone.topRightPoint.x)
-    val randX = zone.topLeftPoint.x + rand.nextInt(xSpread)
-
-    s"MOVE $randX ${rand.nextInt(9000)} ${buster.name}:Wandering"
+  def updateBusterLocation(busterId: Int, point: Point): Unit = {
+    val entry:Buster = busterIdToBuster(busterId)
+    busterIdToBuster.put(busterId, new Buster(busterId, entry.name, point, entry.path))
   }
 }
 
-case class Point(x: Integer, y: Integer)
-case class RectangularBoundingBox(topLeftPoint: Point, bottomLeftPoint: Point, topRightPoint: Point, bottomRightPoint: Point)
+abstract class Path(startingLocation: Point) {
+  private var currentPointIndex = 0
+  private val points: List[Point] = startingLocation match {
+    case Point(0,0) => getPoints
+    case _ => getPoints.reverse
+  }
 
-abstract class Agent(val id: Integer, val name: String, val point: Point)
+  def getPoints: List[Point]
+  def isLooped: Boolean
 
+  def getCurrentPointInPath: Point = points(currentPointIndex)
+
+  def getNextPointAndAdvance: Option[Point] = {
+    if (currentPointIndex == points.size - 1 && isLooped) {
+      currentPointIndex = 0
+      Some(points(currentPointIndex))
+    } else if (currentPointIndex == points.size - 1 && !isLooped) {
+      None
+    } else {
+      currentPointIndex += 1
+      Some(points(currentPointIndex))
+    }
+  }
+}
+
+class ZigZagPath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(2000, 2000), Point(4000,7000), Point(8000,2000), Point(12000, 7000), Point(14000, 2000))
+
+  override def isLooped: Boolean = false
+}
+
+class InvertedZigZagPath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(7000, 2000), Point(4000,2000), Point(8000,7000), Point(12000, 2000), Point(14000, 7000))
+
+  override def isLooped: Boolean = false
+}
+
+class BorderPath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(2000, 2000), Point(14000,2000), Point(14000,7000), Point(2000, 7000))
+
+  override def isLooped: Boolean = true
+}
+
+class InvertedBorderPath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(2000, 2000), Point(2000, 7000), Point(14000,7000), Point(14000, 2000))
+
+  override def isLooped: Boolean = true
+}
+
+class TrianglePath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(2000, 7000), Point(8000,2000), Point(14000,7000))
+
+  override def isLooped: Boolean = true
+}
+
+class InvertedTrianglePath(startingLocation: Point) extends Path(startingLocation) {
+  override def getPoints: List[Point] =
+    List(Point(2000, 2000), Point(8000,7000), Point(14000,2000))
+
+  override def isLooped: Boolean = true
+}
+
+case class Point(x: Int, y: Int)
+abstract class Agent(val id: Int, val name: String, val point: Point)
 
 object Ghost {
   val NAMES = List("Stephanie", "Erick", "Vimesh", "Jeff") ::: (5 to 30).toList.map(i => s"Ghost $i")
 }
 
 sealed class Ghost(
-    id: Integer,
+    id: Int,
     name: String,
     point: Point,
-    val numTiedBusters: Integer,
+    val numTiedBusters: Int,
     val seenThisRound: Boolean,
-    val heldByGhostId: Option[Int])
+    val heldByBusterId: Option[Int])
   extends Agent(id, name, point)
 
 
@@ -220,10 +316,10 @@ object Buster {
 }
 
 sealed class Buster(
-    id: Integer,
+    id: Int,
     name: String,
     point: Point,
-    val zone: RectangularBoundingBox)
+    val path: Path)
   extends Agent(id, name, point) {
 
   def stun(other: Buster): Unit = {
@@ -240,12 +336,20 @@ sealed class Buster(
 
   def isAbleToBust(ghost: Ghost): Boolean = {
     val distance = distanceBetween(ghost)
-    distance <= 1760 && distance >= 900 && ghost.heldByGhostId.isEmpty
+    distance <= 1760 && distance >= 900 && ghost.heldByBusterId.isEmpty
   }
 
   def shouldPursueGhost(ghost: Ghost): Boolean = {
     val distance = distanceBetween(ghost)
     distance <= 2200 && distance > 1760
+  }
+
+  def getPathPoint: Option[Point] = {
+    if (point.x == path.getCurrentPointInPath.x && point.y == path.getCurrentPointInPath.y) {
+      path.getNextPointAndAdvance
+    } else {
+      Some(path.getCurrentPointInPath)
+    }
   }
 
   private def distanceBetween(agent: Agent): Double = {
@@ -255,31 +359,5 @@ sealed class Buster(
     )
 
     abs(distance)
-  }
-
-}
-
-sealed class BoardPartitioner(width: Integer, height: Integer) {
-
-  def partition(numParts: Integer): List[RectangularBoundingBox] = {
-    val columnWidth = ceil(width.toDouble / numParts).toInt
-
-    val head = RectangularBoundingBox(
-      topLeftPoint = Point(0,0),
-      bottomLeftPoint = Point(0, height),
-      topRightPoint = Point(columnWidth, 0),
-      bottomRightPoint = Point(columnWidth, height)
-    )
-
-    val tail = (1 until numParts).toList.map { index =>
-      RectangularBoundingBox(
-        topLeftPoint = Point(columnWidth * index, 0),
-        bottomLeftPoint = Point(columnWidth * index, height),
-        topRightPoint = Point(columnWidth * (index+1), 0),
-        bottomRightPoint = Point(columnWidth * (index+1), height)
-      )
-    }
-
-    head :: tail
   }
 }
